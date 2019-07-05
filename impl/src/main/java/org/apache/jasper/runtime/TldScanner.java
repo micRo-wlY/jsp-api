@@ -383,72 +383,91 @@ public class TldScanner implements ServletContainerInitializer {
                          boolean isLocal)
             throws JasperException {
 
+        TldInfo[] tldInfos = null;
+        JarFile jarFile = null;
         String resourcePath = conn.getJarFileURL().toString();
-        TldInfo[] tldInfos = jarTldCacheLocal.get(resourcePath);
+        try {
+            boolean gotExclusiveAccess = false;
+            while (!gotExclusiveAccess) { // try until we get exclusive access
 
-        // Optimize for most common cases: jars known to NOT have tlds
-        if (tldInfos != null && tldInfos.length == 0) {
-            try {
-                conn.getJarFile().close();
-            } catch (IOException ex) {
-                //ignored
-            }
-            return;
-        }
+            jarFile = conn.getJarFile();
+            synchronized (jarFile) {
+                try {
+                    // just check whether the jar file is still open
+                	jarFile.size();
+                    gotExclusiveAccess = true;
+                } catch (IllegalStateException ex) {
+                    // it's not open, need to try again
+                    continue;
+                }
+                tldInfos = jarTldCacheLocal.get(resourcePath);
 
-        // scan the tld if the jar has not been cached.
-        if (tldInfos == null) {
-            JarFile jarFile = null;
-            ArrayList<TldInfo> tldInfoA = new ArrayList<TldInfo>();
-            try {
-                jarFile = conn.getJarFile();
-                if (tldNames != null) {
-                    for (String tldName : tldNames) {
-                        JarEntry entry = jarFile.getJarEntry(tldName);
-                        InputStream stream = jarFile.getInputStream(entry);
-                        tldInfoA.add(scanTld(resourcePath, tldName, stream));
+                // Optimize for most common cases: jars known to NOT have tlds
+                if (tldInfos != null && tldInfos.length == 0) {
+                    try {
+                        conn.getJarFile().close();
+                    } catch (IOException ex) {
+                        //ignored
                     }
-                } else {
-                    Enumeration<JarEntry> entries = jarFile.entries();
-                    while (entries.hasMoreElements()) {
-                        JarEntry entry = entries.nextElement();
-                        String name = entry.getName();
-                        if (!name.startsWith("META-INF/")) continue;
-                        if (!name.endsWith(".tld")) continue;
-                        InputStream stream = jarFile.getInputStream(entry);
-                        tldInfoA.add(scanTld(resourcePath, name, stream));
+                    return;
+                }
+
+                // scan the tld if the jar has not been cached.
+                if (tldInfos == null) {
+                    ArrayList<TldInfo> tldInfoA = new ArrayList<TldInfo>();
+
+                    if (tldNames != null) {
+                        for (String tldName : tldNames) {
+                            JarEntry entry = jarFile.getJarEntry(tldName);
+                            InputStream stream = jarFile.getInputStream(entry);
+                            tldInfoA.add(scanTld(resourcePath, tldName, stream));
+                        }
+                    } else {
+                        Enumeration<JarEntry> entries = jarFile.entries();
+                        while (entries.hasMoreElements()) {
+                            JarEntry entry = entries.nextElement();
+                            String name = entry.getName();
+                            if (!name.startsWith("META-INF/")) continue;
+                            if (!name.endsWith(".tld")) continue;
+                            InputStream stream = jarFile.getInputStream(entry);
+                            tldInfoA.add(scanTld(resourcePath, name, stream));
+                        }
+                    }
+                    // Update the jar TLD cache
+                    tldInfos = tldInfoA.toArray(new TldInfo[tldInfoA.size()]);
+                    jarTldCacheLocal.put(resourcePath, tldInfos);
+                    if (!isLocal) {
+                        // Also update the global cache;
+                        jarTldCache.put(resourcePath, tldInfos);
                     }
                 }
-            } catch (IOException ex) {
-                if (resourcePath.startsWith(FILE_PROTOCOL) &&
-                        !((new File(resourcePath)).exists())) {
-                    if (log.isLoggable(Level.WARNING)) {
-                        log.log(Level.WARNING,
-                            Localizer.getMessage("jsp.warn.nojar",
-                                                 resourcePath),
-                            ex);
-                    }
-                } else {
-                    throw new JasperException(
-                        Localizer.getMessage("jsp.error.jar.io", resourcePath),
+            }
+
+            } // end of retry loop
+        } catch (IOException ex) {
+            if (resourcePath.startsWith(FILE_PROTOCOL) &&
+                    !((new File(resourcePath)).exists())) {
+                if (log.isLoggable(Level.WARNING)) {
+                    log.log(Level.WARNING,
+                        Localizer.getMessage("jsp.warn.nojar",
+                                             resourcePath),
                         ex);
                 }
-            } finally {
-                if (jarFile != null) {
-                    try {
-                        jarFile.close();
-                    } catch (Throwable t) {
-                        // ignore
-                    }
-                }
+            } else {
+                throw new JasperException(
+                    Localizer.getMessage("jsp.error.jar.io", resourcePath),
+                    ex);
             }
-            // Update the jar TLD cache
-            tldInfos = tldInfoA.toArray(new TldInfo[tldInfoA.size()]);
-            jarTldCacheLocal.put(resourcePath, tldInfos);
-            if (!isLocal) {
-                // Also update the global cache;
-                jarTldCache.put(resourcePath, tldInfos);
-            }
+        } finally {
+        	synchronized (jarFile) {
+	            if (jarFile != null) {
+	                try {
+	                    jarFile.close();
+	                } catch (Throwable t) {
+	                    // ignore
+	                }
+	            }
+        	}
         }
 
         // Iterate over tldinfos to add listeners or to map tldlocations
